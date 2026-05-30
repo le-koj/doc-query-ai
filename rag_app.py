@@ -6,6 +6,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter  # Split doc
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings  # Gemini LLM and embedding models
 from langchain_community.vectorstores import Chroma  # Persist and query document embeddings locally
 from langchain_core.prompts import PromptTemplate  # Format prompts sent to the LLM
+from langchain_core.output_parsers import StrOutputParser  # Extract plain text from LLM responses
 from langchain_core.runnables import RunnablePassthrough  # Pass inputs through the RAG chain unchanged
 
 # Load environment variables from .env file
@@ -62,11 +63,24 @@ rag_chain = (
     {"context": retriever | format_docs, "question": RunnablePassthrough()}
     | prompt
     | llm
+    | StrOutputParser()
 )
 
 # Test the RAG chain
-user_question = input("Enter your question: ")
-print("\n", "User question:", user_question)
+# Chat with your PDF in a continuous loop
+while True:
+    # 1. Wait for user input
+    user_question = input("Enter your question: ")
+    print("\n", "User question: ", user_question)
+    
+    # 2. Allow the user to exit the loop and close the program
+    if user_question.lower() in ["exit", "quit", "bye"]:
+        print("Shutting down chatbot... Goodbye!")
+        break
+    
+    # 3. Send the question to the RAG chain
+    clean_answer = rag_chain.invoke(user_question)
+    
+    # 4. Print the answer
+    print(f"\nAnswer: {clean_answer}")
 
-response = rag_chain.invoke(user_question)
-print(f"Answer: {response.content}")
