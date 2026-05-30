@@ -36,7 +36,7 @@ class TestAnswer:
 
         result = app.answer("What is PTO?", history=[])
 
-        assert result == "RAG pipeline is not initialised."
+        assert result == "Upload a PDF and click 'Index document' before asking questions."
 
     def test_delegates_to_rag_chain(self, mock_rag_chain, monkeypatch):
         monkeypatch.setattr(app, "_rag_chain", mock_rag_chain)
@@ -76,3 +76,14 @@ class TestIngestPdf:
         assert app._vector_db is new_db
         assert app._rag_chain is mock_chain
         assert result == "Indexed: invoice.pdf"
+
+    @patch.object(app, "reindex_vector_store")
+    def test_returns_ingest_error_message(self, mock_reindex, monkeypatch):
+        mock_reindex.side_effect = app.PdfIngestError("No extractable text found in this PDF.")
+        monkeypatch.setattr(app, "_rag_chain", MagicMock())
+        uploaded = SimpleNamespace(path="/tmp/blank.pdf", orig_name="scan.pdf")
+
+        result = app.ingest_pdf(uploaded)
+
+        assert result == "No extractable text found in this PDF."
+        assert app._rag_chain is not None

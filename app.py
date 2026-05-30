@@ -13,7 +13,7 @@ import gradio as gr  # Web UI framework for the chat interface
 from dotenv import load_dotenv  # Load API keys from a .env file
 
 from rag.chain import build_rag_chain  # Build the retrieval + LLM chain
-from rag.ingest import load_vector_store, reindex_vector_store  # Load or re-index PDF vectors
+from rag.ingest import PdfIngestError, load_vector_store, reindex_vector_store  # Load or re-index PDF vectors
 
 load_dotenv()  # Read GOOGLE_API_KEY and other secrets from .env
 
@@ -26,12 +26,19 @@ _rag_chain = None  # LCEL chain; initialised by init_pipeline()
 def init_pipeline(pdf_path: str = PDF_PATH) -> None:
     """Load the vector store and build the RAG chain.
 
+    When no persisted store exists and the default PDF is missing, the pipeline
+    stays uninitialised until a document is uploaded via the UI.
+
     Args:
         pdf_path: Filesystem path to the PDF to index when no store exists.
     """
     global _vector_db, _rag_chain
     print("Initialising RAG pipeline...")
     _vector_db = load_vector_store(pdf_path)  # Load existing store or ingest the default PDF
+    if _vector_db is None:
+        _rag_chain = None
+        print("Ready. Upload a PDF and click 'Index document' to begin.\n")
+        return
     _rag_chain = build_rag_chain(_vector_db)  # Wire retriever → prompt → LLM → parser
     print("Ready.\n")
 
@@ -50,7 +57,7 @@ def answer(question: str, history: list) -> str:
         return "Please enter a question."  # Reject empty submissions early
 
     if _rag_chain is None:
-        return "RAG pipeline is not initialised."  # Guard against use before init_pipeline()
+        return "Upload a PDF and click 'Index document' before asking questions."
 
     return _rag_chain.invoke(question)  # Retrieve context and generate an answer
 
@@ -113,8 +120,12 @@ def ingest_pdf(file) -> str:
     if not pdf_path:
         return "No file uploaded."  # Guard against clicking Index with no file selected
 
-    _vector_db = reindex_vector_store(_vector_db, pdf_path)  # Reset collection in place
-    _rag_chain = build_rag_chain(_vector_db)  # Rebuild the chain against the new store
+    try:
+        _vector_db = reindex_vector_store(_vector_db, pdf_path)  # Reset collection in place
+        _rag_chain = build_rag_chain(_vector_db)  # Rebuild the chain against the new store
+    except PdfIngestError as exc:
+        return str(exc)
+
     return f"Indexed: {_display_name_for_upload(file, pdf_path)}"
 
 

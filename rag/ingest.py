@@ -18,6 +18,10 @@ CHUNK_OVERLAP = 50  # Number of overlapping characters between adjacent chunks
 EMBEDDING_MODEL = "gemini-embedding-2"  # Google Gemini multimodal embedding model (GA)
 
 
+class PdfIngestError(ValueError):
+    """Raised when a PDF cannot be indexed because it has no usable text."""
+
+
 def _build_embeddings() -> GoogleGenerativeAIEmbeddings:
     """Create a Google Gemini embeddings client.
 
@@ -39,6 +43,16 @@ def _load_chunks(pdf_path: str) -> list[Document]:
     print(f"Loading PDF: {pdf_path}")
     loader = PyPDFLoader(pdf_path)  # Point the loader at the target PDF
     documents = loader.load()  # Parse the PDF into page-level Document objects
+    print(f"  → {len(documents)} pages")
+
+    if not documents:
+        raise PdfIngestError("The PDF has no pages.")
+
+    if not any(doc.page_content.strip() for doc in documents):
+        raise PdfIngestError(
+            "No extractable text found in this PDF. "
+            "It may be image-only or scanned — use a PDF with selectable text."
+        )
 
     print("Splitting into chunks...")
     splitter = RecursiveCharacterTextSplitter(
@@ -47,21 +61,29 @@ def _load_chunks(pdf_path: str) -> list[Document]:
     )  # Configure the text splitter with size and overlap settings
     chunks = splitter.split_documents(documents)  # Split pages into smaller chunks
     print(f"  → {len(chunks)} chunks")
+
+    if not chunks:
+        raise PdfIngestError(
+            "The PDF produced no text chunks after splitting. "
+            "Try a document with more readable text content."
+        )
+
     return chunks
 
 
-def load_vector_store(pdf_path: str) -> Chroma:
+def load_vector_store(pdf_path: str) -> Chroma | None:
     """Load an existing Chroma store or build one from a PDF.
 
     If a persisted ChromaDB directory already exists and is non-empty, the
     existing store is loaded to avoid re-embedding on every startup. Otherwise,
-    the PDF at ``pdf_path`` is ingested from scratch.
+    the PDF at ``pdf_path`` is ingested from scratch when that file exists.
 
     Args:
         pdf_path: Filesystem path to the source PDF document.
 
     Returns:
-        Chroma: A Chroma vector store ready for retrieval queries.
+        Chroma | None: A Chroma vector store ready for retrieval queries, or
+            ``None`` when no store exists and ``pdf_path`` is missing.
     """
     embeddings = _build_embeddings()  # Initialise the Gemini embedding model
 
@@ -69,6 +91,10 @@ def load_vector_store(pdf_path: str) -> Chroma:
     if os.path.exists(CHROMA_DIR) and os.listdir(CHROMA_DIR):
         print("Loading existing vector store...")
         return Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+
+    if not os.path.isfile(pdf_path):
+        print(f"No vector store found and PDF missing at {pdf_path}")
+        return None
 
     return build_vector_store(pdf_path, embeddings)  # First run — ingest the PDF
 

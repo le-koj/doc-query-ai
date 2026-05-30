@@ -15,6 +15,13 @@ load_dotenv()  # Read GOOGLE_API_KEY and other secrets from .env
 PDF_PATH = "documents/TechCorp_Official_Employee_Handbook.pdf"  # Default document to index
 
 vector_db = load_vector_store(PDF_PATH)  # Load existing store or ingest the PDF on first run
+if vector_db is None:
+    print(
+        f"\nNo indexed documents yet. Place a PDF at {PDF_PATH}, "
+        "or run the web UI (`python app.py`) to upload one.\n"
+    )
+    raise SystemExit(1)
+
 rag_chain = build_rag_chain(vector_db)  # Wire retriever → prompt → LLM → parser
 
 print("\nChatbot ready. Type 'exit' to quit.\n")

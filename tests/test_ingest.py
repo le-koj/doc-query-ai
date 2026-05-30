@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+from langchain_core.documents import Document
+
 import rag.ingest as ingest
 
 
@@ -25,9 +28,10 @@ class TestLoadVectorStore:
         assert result is mock_chroma.return_value
 
     @patch.object(ingest, "build_vector_store")
+    @patch.object(ingest.os.path, "isfile", return_value=True)
     @patch.object(ingest.os.path, "exists", return_value=False)
     def test_builds_store_when_directory_missing(
-        self, mock_exists, mock_build, monkeypatch
+        self, mock_exists, mock_isfile, mock_build, monkeypatch
     ):
         monkeypatch.setattr(ingest, "CHROMA_DIR", "./missing_chroma")
         mock_build.return_value = MagicMock()
@@ -36,6 +40,19 @@ class TestLoadVectorStore:
 
         mock_build.assert_called_once()
         assert result is mock_build.return_value
+
+    @patch.object(ingest, "build_vector_store")
+    @patch.object(ingest.os.path, "isfile", return_value=False)
+    @patch.object(ingest.os.path, "exists", return_value=False)
+    def test_returns_none_when_store_and_pdf_missing(
+        self, mock_exists, mock_isfile, mock_build, monkeypatch
+    ):
+        monkeypatch.setattr(ingest, "CHROMA_DIR", "./missing_chroma")
+
+        result = ingest.load_vector_store("missing.pdf")
+
+        mock_build.assert_not_called()
+        assert result is None
 
 
 class TestBuildVectorStore:
@@ -76,6 +93,29 @@ class TestBuildVectorStore:
             assert mock_chroma.from_documents.call_args.kwargs["persist_directory"] == str(custom_dir)
 
 
+class TestLoadChunks:
+    """Tests for _load_chunks validation."""
+
+    @patch.object(ingest, "PyPDFLoader")
+    def test_raises_when_pdf_has_no_text(self, mock_loader_cls):
+        mock_loader_cls.return_value.load.return_value = [Document(page_content="   ")]
+
+        with pytest.raises(ingest.PdfIngestError, match="No extractable text"):
+            ingest._load_chunks("blank.pdf")
+
+    @patch.object(ingest, "PyPDFLoader")
+    def test_raises_when_splitting_produces_no_chunks(self, mock_loader_cls):
+        mock_loader_cls.return_value.load.return_value = [Document(page_content="Hi")]
+
+        with patch.object(
+            ingest.RecursiveCharacterTextSplitter,
+            "split_documents",
+            return_value=[],
+        ):
+            with pytest.raises(ingest.PdfIngestError, match="no text chunks"):
+                ingest._load_chunks("tiny.pdf")
+
+
 class TestReindexVectorStore:
     """Tests for reindex_vector_store in-place collection reset."""
 
@@ -102,3 +142,14 @@ class TestReindexVectorStore:
 
         mock_build.assert_called_once_with("new.pdf")
         assert result is mock_build.return_value
+
+    @patch.object(ingest, "PyPDFLoader")
+    def test_does_not_reset_collection_when_pdf_is_empty(self, mock_loader_cls):
+        mock_loader_cls.return_value.load.return_value = [Document(page_content="")]
+        mock_db = MagicMock()
+
+        with pytest.raises(ingest.PdfIngestError):
+            ingest.reindex_vector_store(mock_db, "blank.pdf")
+
+        mock_db.reset_collection.assert_not_called()
+        mock_db.add_documents.assert_not_called()
