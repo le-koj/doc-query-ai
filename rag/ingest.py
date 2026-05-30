@@ -8,6 +8,7 @@ import os  # Check whether the ChromaDB directory already exists
 
 from langchain_community.document_loaders import PyPDFLoader  # Extract text from PDF files
 from langchain_chroma import Chroma  # Local vector database for document embeddings
+from langchain_core.documents import Document  # Typed document chunks
 from langchain_google_genai import GoogleGenerativeAIEmbeddings  # Gemini embedding model
 from langchain_text_splitters import RecursiveCharacterTextSplitter  # Split documents into chunks
 
@@ -24,6 +25,29 @@ def _build_embeddings() -> GoogleGenerativeAIEmbeddings:
         GoogleGenerativeAIEmbeddings: Configured embedding model instance.
     """
     return GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
+
+
+def _load_chunks(pdf_path: str) -> list[Document]:
+    """Load a PDF and split it into overlapping text chunks.
+
+    Args:
+        pdf_path: Filesystem path to the PDF file.
+
+    Returns:
+        list[Document]: The PDF content split into chunk-sized documents.
+    """
+    print(f"Loading PDF: {pdf_path}")
+    loader = PyPDFLoader(pdf_path)  # Point the loader at the target PDF
+    documents = loader.load()  # Parse the PDF into page-level Document objects
+
+    print("Splitting into chunks...")
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+    )  # Configure the text splitter with size and overlap settings
+    chunks = splitter.split_documents(documents)  # Split pages into smaller chunks
+    print(f"  → {len(chunks)} chunks")
+    return chunks
 
 
 def load_vector_store(pdf_path: str) -> Chroma:
@@ -52,6 +76,7 @@ def load_vector_store(pdf_path: str) -> Chroma:
 def build_vector_store(
     pdf_path: str,
     embeddings: GoogleGenerativeAIEmbeddings | None = None,
+    persist_directory: str | None = None,
 ) -> Chroma:
     """Ingest a PDF: load, chunk, embed, and persist to Chroma.
 
@@ -59,6 +84,8 @@ def build_vector_store(
         pdf_path: Filesystem path to the PDF file to index.
         embeddings: Optional pre-built embedding model. A new instance is
             created when ``None``.
+        persist_directory: Directory for ChromaDB persistence. Defaults to
+            ``CHROMA_DIR``.
 
     Returns:
         Chroma: A freshly built and persisted Chroma vector store.
@@ -66,23 +93,42 @@ def build_vector_store(
     if embeddings is None:
         embeddings = _build_embeddings()  # Create embeddings client if not supplied
 
-    print(f"Loading PDF: {pdf_path}")
-    loader = PyPDFLoader(pdf_path)  # Point the loader at the target PDF
-    documents = loader.load()  # Parse the PDF into page-level Document objects
-
-    print("Splitting into chunks...")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )  # Configure the text splitter with size and overlap settings
-    chunks = splitter.split_documents(documents)  # Split pages into smaller chunks
-    print(f"  → {len(chunks)} chunks")
+    target_dir = persist_directory or CHROMA_DIR  # Allow indexing into a custom directory
+    chunks = _load_chunks(pdf_path)  # Load and split the source PDF
 
     print("Embedding and persisting vector store...")
     vector_db = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
-        persist_directory=CHROMA_DIR,
-    )  # Embed chunks and write them to the local ChromaDB directory
+        persist_directory=target_dir,
+    )  # Embed chunks and write them to the ChromaDB directory
+    print("  → Done")
+    return vector_db
+
+
+def reindex_vector_store(vector_db: Chroma, pdf_path: str) -> Chroma:
+    """Replace all documents in an existing store with a new PDF's chunks.
+
+    Reuses the live Chroma client and resets its collection in place instead of
+    deleting the persist directory. This avoids the ChromaDB ``SQLITE_READONLY_DBMOVED``
+    error that occurs when a cached persistent client's backing file is removed
+    on disk.
+
+    Args:
+        vector_db: The open Chroma store to re-index. When ``None``, a fresh
+            store is built from ``pdf_path``.
+        pdf_path: Filesystem path to the new PDF to index.
+
+    Returns:
+        Chroma: The same vector store, now containing only the new PDF's chunks.
+    """
+    if vector_db is None:
+        return build_vector_store(pdf_path)  # No live store yet — build from scratch
+
+    chunks = _load_chunks(pdf_path)  # Load and split the new PDF first
+
+    print("Resetting collection and embedding new documents...")
+    vector_db.reset_collection()  # Drop and recreate the collection on the same client
+    vector_db.add_documents(chunks)  # Embed and persist the new chunks
     print("  → Done")
     return vector_db

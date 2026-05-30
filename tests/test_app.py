@@ -6,6 +6,23 @@ from unittest.mock import MagicMock, patch
 import app
 
 
+class TestResolveUploadPath:
+    """Tests for _resolve_upload_path."""
+
+    def test_none_returns_none(self):
+        assert app._resolve_upload_path(None) is None
+
+    def test_string_path(self):
+        assert app._resolve_upload_path("/tmp/doc.pdf") == "/tmp/doc.pdf"
+
+    def test_filedata_uses_path(self):
+        upload = SimpleNamespace(path="/tmp/gradio/doc.pdf", orig_name="invoice.pdf")
+        assert app._resolve_upload_path(upload) == "/tmp/gradio/doc.pdf"
+
+    def test_dict_uses_path(self):
+        assert app._resolve_upload_path({"path": "/tmp/doc.pdf"}) == "/tmp/doc.pdf"
+
+
 class TestAnswer:
     """Tests for the answer() chat handler."""
 
@@ -37,24 +54,25 @@ class TestIngestPdf:
         assert app.ingest_pdf(None) == "No file uploaded."
 
     @patch.object(app, "build_rag_chain")
-    @patch.object(app, "build_vector_store")
-    @patch.object(app.shutil, "rmtree")
-    @patch.object(app.os.path, "exists", return_value=True)
+    @patch.object(app, "reindex_vector_store")
     def test_reindexes_uploaded_pdf(
-        self, mock_exists, mock_rmtree, mock_build_store, mock_build_chain, monkeypatch
+        self,
+        mock_reindex,
+        mock_build_chain,
+        monkeypatch,
     ):
-        monkeypatch.setattr(app, "CHROMA_DIR", "./chroma_db")
-        mock_db = MagicMock()
+        existing_db = MagicMock()
+        monkeypatch.setattr(app, "_vector_db", existing_db)
+        new_db = MagicMock()
+        mock_reindex.return_value = new_db
         mock_chain = MagicMock()
-        mock_build_store.return_value = mock_db
         mock_build_chain.return_value = mock_chain
-        uploaded = SimpleNamespace(name="/tmp/uploaded.pdf")
+        uploaded = SimpleNamespace(path="/tmp/uploaded.pdf", orig_name="invoice.pdf")
 
         result = app.ingest_pdf(uploaded)
 
-        mock_rmtree.assert_called_once_with("./chroma_db")
-        mock_build_store.assert_called_once_with("/tmp/uploaded.pdf")
-        mock_build_chain.assert_called_once_with(mock_db)
-        assert app._vector_db is mock_db
+        mock_reindex.assert_called_once_with(existing_db, "/tmp/uploaded.pdf")
+        mock_build_chain.assert_called_once_with(new_db)
+        assert app._vector_db is new_db
         assert app._rag_chain is mock_chain
-        assert result == "Indexed: uploaded.pdf"
+        assert result == "Indexed: invoice.pdf"

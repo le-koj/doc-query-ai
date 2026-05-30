@@ -7,15 +7,13 @@ Usage:
     python app.py
 """
 
-import gc  # Force garbage collection to release ChromaDB connections
-import os  # Check paths and extract filenames
-import shutil  # Remove the old ChromaDB directory during re-indexing
+import os  # Extract filenames from upload paths
 
 import gradio as gr  # Web UI framework for the chat interface
 from dotenv import load_dotenv  # Load API keys from a .env file
 
 from rag.chain import build_rag_chain  # Build the retrieval + LLM chain
-from rag.ingest import CHROMA_DIR, build_vector_store, load_vector_store  # Ingest or load PDF vectors
+from rag.ingest import load_vector_store, reindex_vector_store  # Load or re-index PDF vectors
 
 load_dotenv()  # Read GOOGLE_API_KEY and other secrets from .env
 
@@ -57,16 +55,53 @@ def answer(question: str, history: list) -> str:
     return _rag_chain.invoke(question)  # Retrieve context and generate an answer
 
 
+def _resolve_upload_path(file) -> str | None:
+    """Extract the on-disk PDF path from a Gradio file upload.
+
+    Gradio 6 passes a ``FileData`` object with a ``path`` attribute. Older
+    versions and test doubles may supply a plain string or an object with
+    ``name``.
+
+    Args:
+        file: Gradio upload value, file-like object, path string, or dict.
+
+    Returns:
+        str | None: Absolute or server-side path to the uploaded PDF, or
+            ``None`` when no path can be resolved.
+    """
+    if file is None:
+        return None
+    if isinstance(file, str):
+        return file
+    if isinstance(file, dict):
+        return file.get("path") or file.get("name")
+    return getattr(file, "path", None) or getattr(file, "name", None)
+
+
+def _display_name_for_upload(file, pdf_path: str) -> str:
+    """Return a human-readable filename for status messages.
+
+    Args:
+        file: Original Gradio upload value.
+        pdf_path: Resolved filesystem path to the uploaded PDF.
+
+    Returns:
+        str: Original upload name when available, otherwise the path basename.
+    """
+    if isinstance(file, dict):
+        return file.get("orig_name") or os.path.basename(pdf_path)
+    orig_name = getattr(file, "orig_name", None)
+    return orig_name or os.path.basename(pdf_path)
+
+
 def ingest_pdf(file) -> str:
     """Re-index a newly uploaded PDF and rebuild the RAG chain.
 
-    Releases the existing ChromaDB connection, deletes the persisted store,
-    embeds the uploaded PDF, and swaps in a fresh chain backed by the new
-    vectors.
+    Resets the existing ChromaDB collection in place (reusing the live client)
+    and embeds the uploaded PDF's chunks, then rebuilds the chain.
 
     Args:
-        file: Gradio file object with a ``name`` attribute pointing to the
-            uploaded PDF on disk.
+        file: Gradio ``FileData`` upload whose ``path`` points to the PDF on disk.
 
     Returns:
         str: A status message confirming which file was indexed, or an
@@ -74,22 +109,13 @@ def ingest_pdf(file) -> str:
     """
     global _vector_db, _rag_chain  # Replace the module-level store and chain references
 
-    if file is None:
+    pdf_path = _resolve_upload_path(file)  # Gradio 6 provides FileData.path, not .name
+    if not pdf_path:
         return "No file uploaded."  # Guard against clicking Index with no file selected
 
-    # Release the ChromaDB connection before deleting the directory.
-    # Without this the underlying SQLite file stays locked and the new
-    # Chroma.from_documents() call fails with "readonly database".
-    _vector_db = None  # Drop the reference to the open Chroma client
-    _rag_chain = None  # Drop the reference to the chain that wraps the old retriever
-    gc.collect()  # Force Python to close the underlying SQLite connection
-
-    if os.path.exists(CHROMA_DIR):
-        shutil.rmtree(CHROMA_DIR)  # Remove the old persisted vector store
-
-    _vector_db = build_vector_store(file.name)  # Embed the uploaded PDF into a fresh store
+    _vector_db = reindex_vector_store(_vector_db, pdf_path)  # Reset collection in place
     _rag_chain = build_rag_chain(_vector_db)  # Rebuild the chain against the new store
-    return f"Indexed: {os.path.basename(file.name)}"  # Confirm success in the UI
+    return f"Indexed: {_display_name_for_upload(file, pdf_path)}"
 
 
 with gr.Blocks(title="Doc Query AI") as demo:
