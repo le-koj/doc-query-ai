@@ -23,3 +23,15 @@ chunks = text_splitter.split_documents(document)  # Split the document into chun
 print(f"Split into {len(chunks)} chunks")  # Print the number of chunks
 
 print(chunks[0].page_content)
+
+print("Embedding chunks and creating vector store...")  # Status message while the chunks are being embedded
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")  # Create an embedding model
+vector_db = Chroma.from_documents(
+    documents=chunks,
+    embedding=embeddings,
+    persist_directory="./chroma_db"
+)
+print("\n", "Vector store created successfully")  # Status message when the vector store is created
+
+
+
