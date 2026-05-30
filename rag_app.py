@@ -33,5 +33,21 @@ vector_db = Chroma.from_documents(
 )
 print("\n", "Vector store created successfully")  # Status message when the vector store is created
 
+# Configure the database to act as a document retriever
+retriever = vector_db.as_retriever(search_kwargs={"k": 2})
+
+# Define the hidden prompt structure for the LLM
+template = """ 
+Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know.
+Use three sentences maximum and keep the answer concise.
+
+Context: {context}
+
+Question: {question}
+
+Answer:
+"""
+
+prompt = PromptTemplate.from_template(template)
 
 
