@@ -15,4 +15,11 @@ print("Loading PDF documents...")  # Status message while the PDF is being read
 loader = PyPDFLoader("documents/TechCorp_Official_Employee_Handbook.pdf")  # Point the loader at the handbook PDF
 document = loader.load()  # Parse the PDF into a list of page-level Document objects
 
-print(document[0].page_content)  # Print the extracted text from the first page
+#print(document[0].page_content)  # Print the extracted text from the first page
+
+print("Splitting documents into chunks...")  # Status message while the document is being split
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)  # Split the document into chunks of 500 characters with 50 character overlap
+chunks = text_splitter.split_documents(document)  # Split the document into chunks
+print(f"Split into {len(chunks)} chunks")  # Print the number of chunks
+
+print(chunks[0].page_content)
