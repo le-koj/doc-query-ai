@@ -11,7 +11,7 @@ from langchain_core.prompts import PromptTemplate  # Format prompts sent to the 
 from langchain_core.runnables import Runnable, RunnablePassthrough  # Compose and pass data through the chain
 from langchain_google_genai import ChatGoogleGenerativeAI  # Gemini chat model
 
-LLM_MODEL = "gemini-3.5-flash"  # Google Gemini model used for answer generation
+LLM_MODEL = "gemini-2.5-flash"  # Google Gemini model used for answer generation
 RETRIEVER_K = 2  # Number of document chunks retrieved per query
 
 _PROMPT_TEMPLATE = """\
