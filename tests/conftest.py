@@ -8,10 +8,16 @@ from langchain_core.documents import Document
 
 @pytest.fixture
 def sample_documents() -> list[Document]:
-    """Return a small list of LangChain Document objects for unit tests."""
+    """Return a small list of source-tagged Document objects for unit tests."""
     return [
-        Document(page_content="First chunk about vacation policy."),
-        Document(page_content="Second chunk about code of conduct."),
+        Document(
+            page_content="First chunk about vacation policy.",
+            metadata={"source": "handbook.pdf", "page": 0, "doc_id": "abc123"},
+        ),
+        Document(
+            page_content="Second chunk about code of conduct.",
+            metadata={"source": "handbook.pdf", "page": 1, "doc_id": "abc123"},
+        ),
     ]
 
 

@@ -1,17 +1,18 @@
 # Doc Query AI
 
-**Version 1.1.0**
+**Version 2.0.0**
 
-A document question-answering app built with retrieval-augmented generation (RAG). Upload PDFs, index them in a local vector store, and ask natural-language questions grounded in your content.
+A document question-answering app built with retrieval-augmented generation (RAG). Upload multiple PDFs, index them into a local document library, and ask natural-language questions grounded in your content — with answers that cite their source documents.
 
 ## Features
 
-- **PDF ingestion** — load and chunk PDF documents with LangChain
+- **Multi-PDF library** — index many PDFs together; new uploads are added incrementally without wiping existing documents
+- **Source attribution** — every chunk is tagged with its document and page, and answers cite the source(s) used
 - **Vector search** — embed chunks with Google Gemini and store them in ChromaDB
-- **Grounded answers** — retrieve relevant context and generate responses with Gemini
-- **Gradio web UI** — chat interface with example questions and live PDF re-indexing
-- **CLI mode** — interactive terminal chatbot for quick testing
-- **In-place re-indexing** — upload a new PDF in the UI without breaking the ChromaDB client
+- **Grounded answers** — retrieve the most relevant context across all documents and generate responses with Gemini
+- **Gradio web UI** — chat interface with multi-file upload and a live view of indexed documents
+- **CLI mode** — interactive terminal chatbot that reports the current library contents
+- **Idempotent re-indexing** — re-uploading the same file refreshes it in place (matched by content hash)
 - **Unit tests** — pytest suite with mocked dependencies (no API key required)
 
 ## Stack
@@ -64,7 +65,7 @@ GOOGLE_API_KEY=your_api_key_here
 
 Do not commit `.env` — it is listed in `.gitignore`.
 
-Place your source PDF in the `documents/` directory. The default document loaded at startup is `documents/TechCorp_Official_Employee_Handbook.pdf`.
+Optionally place a seed PDF at `documents/TechCorp_Official_Employee_Handbook.pdf` to index automatically on first run. Otherwise the app starts empty and waits for you to upload one or more PDFs through the UI.
 
 ## Usage
 
@@ -77,9 +78,10 @@ python app.py
 
 Open the URL shown in the terminal (default: `http://127.0.0.1:7860`).
 
-- Ask questions in the chat panel
-- Upload a new PDF and click **Index document** to replace the indexed content
-- On subsequent runs, the persisted store in `chroma_db/` is reused — no re-embedding unless you upload a new file
+- Upload one or more PDFs and click **Index documents** to add them to the library
+- The **Indexed documents** table shows each document and its chunk count
+- Ask questions in the chat panel — answers cite the source document(s) and page(s) used
+- On subsequent runs, the persisted store in `chroma_db/` is reused — no re-embedding unless you add or refresh a file
 
 ### CLI
 
@@ -102,23 +104,23 @@ The test suite covers pure logic and guard clauses with mocks — no API key req
 
 | File | What it covers |
 |------|----------------|
-| `test_chain.py` | `_format_docs`, `build_rag_chain` wiring |
-| `test_ingest.py` | `load_vector_store` branching, `build_vector_store`, `reindex_vector_store` |
-| `test_app.py` | `answer()`, `ingest_pdf()`, Gradio upload path resolution |
+| `test_chain.py` | `_format_doc_label`, `_format_docs`, `build_rag_chain` wiring |
+| `test_ingest.py` | `load_vector_store` branching, `_load_chunks` metadata, `add_pdf`, `remove_pdf`, `list_documents` |
+| `test_app.py` | `answer()` with source attribution, `ingest_pdfs()`, Gradio upload path resolution |
 
 Integration tests that call Gemini or ChromaDB with real embeddings can be marked with `@pytest.mark.integration` and skipped in CI.
 
 ## How it works
 
 ```
-PDF → chunk → embed (gemini-embedding-2) → ChromaDB
-                                                ↓
-User question → retrieve top-k chunks → prompt + gemini-2.5-flash → answer
+PDF(s) → chunk + tag (doc_id, source, page) → embed (gemini-embedding-2) → ChromaDB library
+                                                                                  ↓
+User question → retrieve top-k chunks across all docs → prompt + gemini-2.5-flash → answer + sources
 ```
 
-1. **Ingest** (`rag/ingest.py`) — loads a PDF, splits it into 500-character chunks with 50-character overlap, embeds them with `gemini-embedding-2`, and persists to `./chroma_db`
-2. **Chain** (`rag/chain.py`) — retrieves the top 2 most similar chunks, fills a prompt template, and sends it to `gemini-2.5-flash` for a concise answer
-3. **UI** (`app.py`) — Gradio chat interface wired to the chain; re-indexes documents in place via `reset_collection()` without deleting the ChromaDB directory
+1. **Ingest** (`rag/ingest.py`) — loads each PDF, splits it into 500-character chunks with 50-character overlap, tags every chunk with `doc_id` (content hash), `source` filename, `page`, and `chunk_index`, embeds with `gemini-embedding-2`, and appends to `./chroma_db`. `add_pdf` grows the library; `remove_pdf` and `list_documents` manage it.
+2. **Chain** (`rag/chain.py`) — retrieves the top 6 most similar chunks across the whole library, formats them with source labels, fills a prompt template, and sends it to `gemini-2.5-flash` for a concise, source-citing answer
+3. **UI** (`app.py`) — Gradio chat interface with multi-file upload; documents are added incrementally and re-uploads refresh in place by `doc_id` without wiping other documents
 
 ## Project layout
 
@@ -145,6 +147,17 @@ doc-query-ai/
 ```
 
 ## Changelog
+
+### 2.0.0
+
+- **Multi-PDF library**: index many PDFs together; uploads are additive instead of replacing the store
+- Tag every chunk with `doc_id`, `source`, `page`, and `chunk_index` metadata
+- Source-aware retrieval and prompt: answers cite the document(s) and page(s) used
+- Raise retrieval to top-6 chunks for better cross-document recall
+- New ingest API: `add_pdf`, `remove_pdf`, `list_documents`, `compute_doc_id` (replaces `reindex_vector_store`)
+- Multi-file upload in the UI plus a live **Indexed documents** table
+- Idempotent re-indexing keyed on file content hash
+- Expand test suite to 33 tests
 
 ### 1.1.0
 

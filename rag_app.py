@@ -1,26 +1,31 @@
 """CLI entry point for the Doc Query AI chatbot.
 
-Runs an interactive terminal session where users can ask questions about
-indexed PDF documents. Type ``exit``, ``quit``, or ``bye`` to close the
+Runs an interactive terminal session where users can ask questions about the
+indexed document library. Type ``exit``, ``quit``, or ``bye`` to close the
 session.
 """
 
 from dotenv import load_dotenv  # Load API keys from a .env file
 
 from rag.chain import build_rag_chain  # Build the retrieval + LLM chain
-from rag.ingest import load_vector_store  # Load or build the vector store
+from rag.ingest import list_documents, load_vector_store  # Load the library vector store
 
 load_dotenv()  # Read GOOGLE_API_KEY and other secrets from .env
 
-PDF_PATH = "documents/TechCorp_Official_Employee_Handbook.pdf"  # Default document to index
+SEED_PDF_PATH = "documents/TechCorp_Official_Employee_Handbook.pdf"  # Optional seed document
 
-vector_db = load_vector_store(PDF_PATH)  # Load existing store or ingest the PDF on first run
+vector_db = load_vector_store(SEED_PDF_PATH)  # Load existing library or seed it on first run
 if vector_db is None:
     print(
-        f"\nNo indexed documents yet. Place a PDF at {PDF_PATH}, "
+        f"\nNo indexed documents yet. Place a PDF at {SEED_PDF_PATH}, "
         "or run the web UI (`python app.py`) to upload one.\n"
     )
     raise SystemExit(1)
+
+documents = list_documents(vector_db)  # Report what the library currently contains
+print(f"\nLibrary contains {len(documents)} document(s):")
+for doc in documents:
+    print(f"  - {doc['source']} ({doc['chunks']} chunks)")
 
 rag_chain = build_rag_chain(vector_db)  # Wire retriever → prompt → LLM → parser
 
