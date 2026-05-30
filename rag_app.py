@@ -50,4 +50,23 @@ Answer:
 
 prompt = PromptTemplate.from_template(template)
 
+# Initialize the Gemini LLM
+llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
 
+# Helper function to stitch retrieved chunks into a single text block
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# Connect everything together using LangChain Expression Language (LCEL)
+rag_chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+)
+
+# Test the RAG chain
+user_question = input("Enter your question: ")
+print("\n", "User question:", user_question)
+
+response = rag_chain.invoke(user_question)
+print(f"Answer: {response.content}")
