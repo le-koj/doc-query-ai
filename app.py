@@ -15,17 +15,27 @@ import gradio as gr  # Web UI framework for the chat interface
 from dotenv import load_dotenv  # Load API keys from a .env file
 
 from rag.chain import build_rag_chain  # Build the retrieval + LLM chain
-from rag.ingest import build_vector_store, load_vector_store  # Ingest or load PDF vectors
+from rag.ingest import CHROMA_DIR, build_vector_store, load_vector_store  # Ingest or load PDF vectors
 
 load_dotenv()  # Read GOOGLE_API_KEY and other secrets from .env
 
 PDF_PATH = "documents/TechCorp_Official_Employee_Handbook.pdf"  # Default document loaded at startup
 
-# Build the chain once at startup; reused for every user query
-print("Initialising RAG pipeline...")
-_vector_db = load_vector_store(PDF_PATH)  # Load existing store or ingest the default PDF
-_rag_chain = build_rag_chain(_vector_db)  # Wire retriever → prompt → LLM → parser
-print("Ready.\n")
+_vector_db = None  # Chroma vector store; initialised by init_pipeline()
+_rag_chain = None  # LCEL chain; initialised by init_pipeline()
+
+
+def init_pipeline(pdf_path: str = PDF_PATH) -> None:
+    """Load the vector store and build the RAG chain.
+
+    Args:
+        pdf_path: Filesystem path to the PDF to index when no store exists.
+    """
+    global _vector_db, _rag_chain
+    print("Initialising RAG pipeline...")
+    _vector_db = load_vector_store(pdf_path)  # Load existing store or ingest the default PDF
+    _rag_chain = build_rag_chain(_vector_db)  # Wire retriever → prompt → LLM → parser
+    print("Ready.\n")
 
 
 def answer(question: str, history: list) -> str:
@@ -40,6 +50,9 @@ def answer(question: str, history: list) -> str:
     """
     if not question.strip():
         return "Please enter a question."  # Reject empty submissions early
+
+    if _rag_chain is None:
+        return "RAG pipeline is not initialised."  # Guard against use before init_pipeline()
 
     return _rag_chain.invoke(question)  # Retrieve context and generate an answer
 
@@ -71,8 +84,8 @@ def ingest_pdf(file) -> str:
     _rag_chain = None  # Drop the reference to the chain that wraps the old retriever
     gc.collect()  # Force Python to close the underlying SQLite connection
 
-    if os.path.exists("./chroma_db"):
-        shutil.rmtree("./chroma_db")  # Remove the old persisted vector store
+    if os.path.exists(CHROMA_DIR):
+        shutil.rmtree(CHROMA_DIR)  # Remove the old persisted vector store
 
     _vector_db = build_vector_store(file.name)  # Embed the uploaded PDF into a fresh store
     _rag_chain = build_rag_chain(_vector_db)  # Rebuild the chain against the new store
@@ -107,4 +120,5 @@ with gr.Blocks(title="Doc Query AI") as demo:
             )  # Main chat panel with starter example questions
 
 if __name__ == "__main__":
+    init_pipeline()  # Build the vector store and chain before serving requests
     demo.launch()  # Start the local Gradio server (default: http://127.0.0.1:7860)

@@ -73,6 +73,23 @@ python rag_app.py
 
 Type your questions at the prompt. Enter `exit`, `quit`, or `bye` to close the session.
 
+## Testing
+
+```bash
+source venv/bin/activate
+pytest
+```
+
+The test suite covers pure logic and guard clauses with mocks — no API key required. Tests live in `tests/`:
+
+| File | What it covers |
+|------|----------------|
+| `test_chain.py` | `_format_docs`, `build_rag_chain` wiring |
+| `test_ingest.py` | `load_vector_store` branching, `build_vector_store` chunking |
+| `test_app.py` | `answer()` and `ingest_pdf()` handlers |
+
+Integration tests that call Gemini or ChromaDB with real embeddings can be marked with `@pytest.mark.integration` and skipped in CI.
+
 ## How it works
 
 ```
@@ -94,6 +111,7 @@ doc-query-ai/
 ├── rag/
 │   ├── ingest.py       # PDF loading, chunking, embedding, ChromaDB persistence
 │   └── chain.py        # Retriever + prompt + LLM chain
+├── tests/              # Pytest unit tests
 ├── documents/          # Source PDFs (gitignored)
 ├── chroma_db/          # ChromaDB persistence (gitignored)
 ├── requirements.txt
