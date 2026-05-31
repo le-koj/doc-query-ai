@@ -15,13 +15,14 @@ from langchain_community.document_loaders import PyPDFLoader  # Extract text fro
 from langchain_chroma import Chroma  # Local vector database for document embeddings
 from langchain_core.documents import Document  # Typed document chunks
 from langchain_core.embeddings import Embeddings  # Base interface for embedding wrappers
-from langchain_google_genai import GoogleGenerativeAIEmbeddings  # Gemini embedding model
+import torch
+from langchain_huggingface import HuggingFaceEmbeddings  # Local Hugging Face embedding model
 from langchain_text_splitters import RecursiveCharacterTextSplitter  # Split documents into chunks
 
 CHROMA_DIR = "./chroma_db"  # Directory where ChromaDB persists its SQLite database
 CHUNK_SIZE = 500  # Maximum number of characters per text chunk
 CHUNK_OVERLAP = 50  # Number of overlapping characters between adjacent chunks
-EMBEDDING_MODEL = "gemini-embedding-2"  # Google Gemini multimodal embedding model (GA)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")  # Local Hugging Face embedding model
 EMBED_BATCH_SIZE = 100  # Texts per embedding request (the Gemini API max)
 EMBED_MAX_RETRIES = 5  # Attempts before giving up on a rate-limited batch
 EMBED_DEFAULT_RETRY_SECONDS = 30.0  # Fallback wait when the API gives no retry hint
@@ -115,13 +116,18 @@ class ResilientEmbeddings(Embeddings):
 
 
 def _build_embeddings() -> Embeddings:
-    """Create a rate-limit-resilient Google Gemini embeddings client.
+    """Create a rate-limit-resilient Hugging Face embeddings client.
 
     Returns:
-        Embeddings: A wrapper around the configured Gemini embedding model that
+        Embeddings: A wrapper around the configured Hugging Face embedding model that
             retries rate-limited batches with back-off.
     """
-    base = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    base = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True},
+    )
     return ResilientEmbeddings(base)
 
 
@@ -163,7 +169,7 @@ def _load_chunks(pdf_path: str) -> list[Document]:
     print(f"Loading PDF: {pdf_path}")
     loader = PyPDFLoader(pdf_path)  # Point the loader at the target PDF
     documents = loader.load()  # Parse the PDF into page-level Document objects
-    print(f"  → {len(documents)} pages")
+    print(f"  -> {len(documents)} pages")
 
     if not documents:
         raise PdfIngestError("The PDF has no pages.")
@@ -180,7 +186,7 @@ def _load_chunks(pdf_path: str) -> list[Document]:
         chunk_overlap=CHUNK_OVERLAP,
     )  # Configure the text splitter with size and overlap settings
     chunks = splitter.split_documents(documents)  # Split pages into smaller chunks
-    print(f"  → {len(chunks)} chunks")
+    print(f"  -> {len(chunks)} chunks")
 
     if not chunks:
         raise PdfIngestError(
@@ -228,7 +234,7 @@ def load_vector_store(pdf_path: str | None = None) -> Chroma | None:
 
 def build_vector_store(
     pdf_path: str,
-    embeddings: GoogleGenerativeAIEmbeddings | None = None,
+    embeddings: Embeddings | None = None,
     persist_directory: str | None = None,
 ) -> Chroma:
     """Create a new Chroma store seeded with a single PDF's chunks.
@@ -255,7 +261,7 @@ def build_vector_store(
         embedding=embeddings,
         persist_directory=target_dir,
     )  # Embed chunks and write them to the ChromaDB directory
-    print("  → Done")
+    print("  -> Done")
     return vector_db
 
 
@@ -301,7 +307,7 @@ def add_pdf(vector_db: Chroma | None, pdf_path: str) -> dict:
 
     print(f"Adding {len(chunks)} chunks to the library...")
     vector_db.add_documents(chunks)  # Append the new chunks alongside existing docs
-    print("  → Done")
+    print("  -> Done")
     return {
         "vector_db": vector_db,
         "doc_id": doc_id,

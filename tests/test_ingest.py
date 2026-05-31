@@ -8,6 +8,13 @@ from langchain_core.documents import Document
 import rag.ingest as ingest
 
 
+@pytest.fixture(autouse=True)
+def mock_build_embeddings(monkeypatch):
+    """Prevent loading local Hugging Face embedding model during unit tests."""
+    monkeypatch.setattr(ingest, "_build_embeddings", MagicMock())
+
+
+
 class TestParseRetrySeconds:
     """Tests for _parse_retry_seconds."""
 

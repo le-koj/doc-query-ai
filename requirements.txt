@@ -54,6 +54,7 @@ langchain-classic==1.0.7
 langchain-community==0.4.2
 langchain-core==1.4.0
 langchain-google-genai==4.2.4
+langchain-huggingface
 langchain-protocol==0.0.16
 langchain-text-splitters==1.1.2
 langsmith==0.8.7

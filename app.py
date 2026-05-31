@@ -112,25 +112,50 @@ def answer(question: str, history: list, scope=None) -> str:
         str: A plain-text answer grounded in the library, with a list of the
             source documents used.
     """
-    if not question.strip():
-        return "Please enter a question."  # Reject empty submissions early
-
-    if _rag_chain is None:
-        return "Upload one or more PDFs and click 'Index documents' before asking questions."
-
-    chain, retriever = _scoped_pipeline(scope)  # Restrict to selected docs when provided
-
+    print(f"DEBUG: answer() called with:")
+    print(f"  question: {repr(question)} (type: {type(question)})")
+    print(f"  history: {repr(history)} (type: {type(history)})")
+    print(f"  scope: {repr(scope)} (type: {type(scope)})")
+    
     try:
-        result = chain.invoke(question)  # Retrieve context and generate an answer
-        sources = _sources_for(question, retriever)  # Identify which documents were used
-    except EmbeddingQuotaError as exc:
-        return str(exc)
-    except Exception as exc:  # noqa: BLE001 - surface API errors instead of crashing the UI
-        return f"Sorry, something went wrong answering that: {exc}"
+        if not question:
+            print("DEBUG: question is falsy, returning early prompt")
+            return "Please enter a question."
 
-    if sources:
-        result += "\n\n_Sources: " + ", ".join(sources) + "_"
-    return result
+        # If question is a dictionary (like in multimodal mode or custom chatbot interface)
+        if isinstance(question, dict):
+            print("DEBUG: question is a dictionary, extracting text")
+            question_str = question.get("text", "")
+        else:
+            question_str = str(question)
+
+        if not question_str.strip():
+            print("DEBUG: question_str is empty after strip, returning early prompt")
+            return "Please enter a question."
+
+        if _rag_chain is None:
+            print("DEBUG: _rag_chain is None, returning early prompt")
+            return "Upload one or more PDFs and click 'Index documents' before asking questions."
+
+        print("DEBUG: building scoped pipeline")
+        chain, retriever = _scoped_pipeline(scope)  # Restrict to selected docs when provided
+
+        print("DEBUG: invoking chain and retriever")
+        result = chain.invoke(question_str)  # Retrieve context and generate an answer
+        sources = _sources_for(question_str, retriever)  # Identify which documents were used
+
+        if sources:
+            result += "\n\n_Sources: " + ", ".join(sources) + "_"
+        print(f"DEBUG: returning response: {repr(result)}")
+        return result
+    except EmbeddingQuotaError as exc:
+        print(f"DEBUG: EmbeddingQuotaError caught: {exc}")
+        return str(exc)
+    except Exception as exc:
+        import traceback
+        print("DEBUG: Exception caught inside answer():")
+        traceback.print_exc()
+        return f"Sorry, something went wrong answering that: {exc}"
 
 
 def _sources_for(question: str, retriever=None) -> list[str]:

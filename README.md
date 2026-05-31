@@ -1,6 +1,6 @@
 # Doc Query AI
 
-**Version 2.2.0**
+**Version 3.0.0**
 
 A document question-answering app built with retrieval-augmented generation (RAG). Upload multiple PDFs, index them into a local document library, and ask natural-language questions grounded in your content — with answers that cite their source documents.
 
@@ -24,7 +24,7 @@ A document question-answering app built with retrieval-augmented generation (RAG
 |-----------|------------|
 | Vector store | [ChromaDB](https://www.trychroma.com/) via `langchain-chroma` |
 | Orchestration | [LangChain](https://python.langchain.com/) |
-| Embeddings | Google Gemini `gemini-embedding-2` |
+| Embeddings | [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) (local) |
 | LLM | Google Gemini `gemini-3.1-flash-lite` |
 | Reranker | HuggingFace cross-encoder via `sentence-transformers` |
 | Web UI | [Gradio](https://gradio.app/) 6.x |
@@ -33,11 +33,11 @@ A document question-answering app built with retrieval-augmented generation (RAG
 
 | Role | Model | Configured in |
 |------|-------|---------------|
-| Embeddings | `gemini-embedding-2` | `rag/ingest.py` |
+| Embeddings | `BAAI/bge-m3` (local) | `rag/ingest.py` |
 | Answer generation | `gemini-3.1-flash-lite` | `rag/chain.py` |
 | Reranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` (local) | `rag/chain.py` |
 
-Embeddings and answer generation require a [Google AI API key](https://aistudio.google.com/apikey). Free-tier quotas apply separately per model. Reranking runs locally via `sentence-transformers` — no extra API key.
+Answer generation requires a [Google AI API key](https://aistudio.google.com/apikey). Embeddings and reranking run locally — no extra API key or network calls required for vector computation.
 
 ## Prerequisites
 
@@ -135,12 +135,12 @@ Integration tests that call Gemini or ChromaDB with real embeddings can be marke
 ## How it works
 
 ```
-PDF(s) → chunk + tag (doc_id, source, page) → embed (gemini-embedding-2) → ChromaDB library
+PDF(s) → chunk + tag (doc_id, source, page) → embed (BAAI/bge-m3) → ChromaDB library
                                                                                   ↓
 User question → MMR candidates → cross-encoder rerank → top-N chunks → prompt + LLM → answer + sources
 ```
 
-1. **Ingest** (`rag/ingest.py`) — loads each PDF, splits it into 500-character chunks with 50-character overlap, tags every chunk with `doc_id` (content hash), `source` filename, `page`, and `chunk_index`, embeds with `gemini-embedding-2`, and appends to `./chroma_db`. `add_pdf` grows the library; `remove_pdf` and `list_documents` manage it.
+1. **Ingest** (`rag/ingest.py`) — loads each PDF, splits it into 500-character chunks with 50-character overlap, tags every chunk with `doc_id` (content hash), `source` filename, `page`, and `chunk_index`, embeds with `BAAI/bge-m3` locally, and appends to `./chroma_db`. `add_pdf` grows the library; `remove_pdf` and `list_documents` manage it.
 2. **Chain** (`rag/chain.py`) — retrieves chunks with MMR (30 candidates by default, balancing relevance and diversity), optionally reranks them with a local cross-encoder (top 6 by default), optionally filtered to selected `doc_id`s, formats them with source labels, fills a prompt template, and sends it to Gemini for a concise, source-citing answer
 3. **UI** (`app.py`) — Gradio chat interface with multi-file upload, per-document removal, and a **Search in** selector to scope queries; documents are added incrementally and re-uploads refresh in place by `doc_id` without wiping other documents
 
@@ -169,6 +169,13 @@ doc-query-ai/
 ```
 
 ## Changelog
+
+### 3.0.0
+
+- **Local Hugging Face Embeddings**: Migrated embedding pipeline from Google Gemini API to the local Hugging Face `BAAI/bge-m3` model via `langchain-huggingface`.
+- **Dynamic Hardware Fallback**: Automatically routes model execution to CUDA/GPU if present, falling back dynamically to CPU.
+- **Robust Gradio Chat Interface**: Handled Gradio 5/6 multimodal parameter dictionaries and caught global exceptions to prevent UI `NoneType` errors.
+- **Improved Test Execution**: Added a mock embedding fixture to the test suite to prevent downloading model weights during offline test runs.
 
 ### 2.2.0
 
