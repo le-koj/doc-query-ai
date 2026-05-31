@@ -13,8 +13,10 @@ from langchain_core.prompts import PromptTemplate  # Format prompts sent to the 
 from langchain_core.runnables import Runnable, RunnablePassthrough  # Compose and pass data through the chain
 from langchain_google_genai import ChatGoogleGenerativeAI  # Gemini chat model
 
-LLM_MODEL = "gemini-2.5-flash"  # Google Gemini model used for answer generation
-RETRIEVER_K = 6  # Number of document chunks retrieved per query across the library
+LLM_MODEL = "gemini-3.1-flash-lite"  # Google Gemini model used for answer generation
+RETRIEVER_K = 6  # Number of document chunks returned per query
+RETRIEVER_FETCH_K = 20  # Candidate pool size MMR selects from before diversifying
+MMR_LAMBDA = 0.5  # 1.0 = pure relevance, 0.0 = pure diversity; 0.5 balances both
 
 _PROMPT_TEMPLATE = """\
 You are answering questions about a library of documents. Use only the
@@ -70,19 +72,33 @@ def _format_docs(docs) -> str:
     return "\n\n".join(blocks)
 
 
-def build_retriever(vector_db: Chroma):
-    """Create a top-k retriever over the document library.
+def build_retriever(vector_db: Chroma, doc_ids: list[str] | None = None):
+    """Create an MMR retriever over the document library, optionally scoped.
+
+    Uses Maximal Marginal Relevance (MMR) so the returned chunks are both
+    relevant to the query and diverse from one another — which improves recall
+    across multiple documents. When ``doc_ids`` is provided, retrieval is
+    restricted to those documents via a ``doc_id`` metadata filter.
 
     Args:
         vector_db: A Chroma vector store containing embedded document chunks.
+        doc_ids: Optional list of ``doc_id`` values to restrict the search to.
+            ``None`` or an empty list searches the entire library.
 
     Returns:
-        A retriever that returns the ``RETRIEVER_K`` most similar chunks.
+        A retriever that returns up to ``RETRIEVER_K`` relevant, diverse chunks.
     """
-    return vector_db.as_retriever(search_kwargs={"k": RETRIEVER_K})
+    search_kwargs = {
+        "k": RETRIEVER_K,
+        "fetch_k": RETRIEVER_FETCH_K,
+        "lambda_mult": MMR_LAMBDA,
+    }
+    if doc_ids:
+        search_kwargs["filter"] = {"doc_id": {"$in": list(doc_ids)}}  # Scope to selected docs
+    return vector_db.as_retriever(search_type="mmr", search_kwargs=search_kwargs)
 
 
-def build_rag_chain(vector_db: Chroma) -> Runnable:
+def build_rag_chain(vector_db: Chroma, doc_ids: list[str] | None = None) -> Runnable:
     """Wire retriever, prompt, LLM, and parser into a single LCEL chain.
 
     The resulting chain accepts a plain-text question string and returns a
@@ -90,12 +106,14 @@ def build_rag_chain(vector_db: Chroma) -> Runnable:
 
     Args:
         vector_db: A Chroma vector store containing embedded document chunks.
+        doc_ids: Optional list of ``doc_id`` values to restrict retrieval to.
+            ``None`` or an empty list searches the entire library.
 
     Returns:
         Runnable: An invokable LangChain chain with the signature
             ``question: str -> answer: str``.
     """
-    retriever = build_retriever(vector_db)  # Fetch top-k similar chunks across the library
+    retriever = build_retriever(vector_db, doc_ids)  # Fetch relevant, diverse chunks (optionally scoped)
     prompt = PromptTemplate.from_template(_PROMPT_TEMPLATE)  # Build the RAG prompt template
     llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0)  # Initialise Gemini with deterministic output
 

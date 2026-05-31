@@ -1,6 +1,6 @@
 # Doc Query AI
 
-**Version 2.0.0**
+**Version 2.1.0**
 
 A document question-answering app built with retrieval-augmented generation (RAG). Upload multiple PDFs, index them into a local document library, and ask natural-language questions grounded in your content — with answers that cite their source documents.
 
@@ -8,9 +8,11 @@ A document question-answering app built with retrieval-augmented generation (RAG
 
 - **Multi-PDF library** — index many PDFs together; new uploads are added incrementally without wiping existing documents
 - **Source attribution** — every chunk is tagged with its document and page, and answers cite the source(s) used
+- **Scoped search** — restrict the chat to a chosen subset of documents, or search the whole library
+- **MMR retrieval** — Maximal Marginal Relevance returns relevant *and* diverse chunks for better multi-document recall
 - **Vector search** — embed chunks with Google Gemini and store them in ChromaDB
-- **Grounded answers** — retrieve the most relevant context across all documents and generate responses with Gemini
-- **Gradio web UI** — chat interface with multi-file upload and a live view of indexed documents
+- **Resilient embeddings** — automatic retry/back-off on Gemini rate limits (429), with a clear message if quota is exhausted
+- **Gradio web UI** — chat interface with multi-file upload, a live document table, and per-document removal
 - **CLI mode** — interactive terminal chatbot that reports the current library contents
 - **Idempotent re-indexing** — re-uploading the same file refreshes it in place (matched by content hash)
 - **Unit tests** — pytest suite with mocked dependencies (no API key required)
@@ -80,6 +82,8 @@ Open the URL shown in the terminal (default: `http://127.0.0.1:7860`).
 
 - Upload one or more PDFs and click **Index documents** to add them to the library
 - The **Indexed documents** table shows each document and its chunk count
+- Use **Remove a document** to delete a single document from the library
+- Use **Search in** to restrict the chat to selected documents (leave empty to search everything)
 - Ask questions in the chat panel — answers cite the source document(s) and page(s) used
 - On subsequent runs, the persisted store in `chroma_db/` is reused — no re-embedding unless you add or refresh a file
 
@@ -119,8 +123,8 @@ User question → retrieve top-k chunks across all docs → prompt + gemini-2.5-
 ```
 
 1. **Ingest** (`rag/ingest.py`) — loads each PDF, splits it into 500-character chunks with 50-character overlap, tags every chunk with `doc_id` (content hash), `source` filename, `page`, and `chunk_index`, embeds with `gemini-embedding-2`, and appends to `./chroma_db`. `add_pdf` grows the library; `remove_pdf` and `list_documents` manage it.
-2. **Chain** (`rag/chain.py`) — retrieves the top 6 most similar chunks across the whole library, formats them with source labels, fills a prompt template, and sends it to `gemini-2.5-flash` for a concise, source-citing answer
-3. **UI** (`app.py`) — Gradio chat interface with multi-file upload; documents are added incrementally and re-uploads refresh in place by `doc_id` without wiping other documents
+2. **Chain** (`rag/chain.py`) — retrieves chunks with MMR (top 6 from a pool of 20, balancing relevance and diversity), optionally filtered to selected `doc_id`s, formats them with source labels, fills a prompt template, and sends it to `gemini-2.5-flash` for a concise, source-citing answer
+3. **UI** (`app.py`) — Gradio chat interface with multi-file upload, per-document removal, and a **Search in** selector to scope queries; documents are added incrementally and re-uploads refresh in place by `doc_id` without wiping other documents
 
 ## Project layout
 
@@ -147,6 +151,15 @@ doc-query-ai/
 ```
 
 ## Changelog
+
+### 2.1.0
+
+- Scoped search: restrict the chat to selected documents via a `doc_id` metadata filter
+- MMR retrieval (`fetch_k=20`, `lambda_mult=0.5`) for relevant, diverse multi-document context
+- Resilient embeddings: retry with back-off on Gemini 429 rate limits; `EmbeddingQuotaError` surfaced cleanly in the UI
+- Per-document **Remove** button and a synced **Search in** multi-select in the UI
+- Graceful error handling in chat and ingestion instead of tracebacks
+- Expand test suite to 53 tests
 
 ### 2.0.0
 

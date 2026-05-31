@@ -76,6 +76,50 @@ class TestAnswer:
         assert "handbook.pdf, p. 1" in result
         assert "benefits.pdf, p. 5" in result
 
+    def test_scope_builds_scoped_pipeline(self, monkeypatch):
+        monkeypatch.setattr(app, "_vector_db", MagicMock())
+        monkeypatch.setattr(app, "_rag_chain", MagicMock())  # Unscoped chain (should be unused)
+        monkeypatch.setattr(app, "_scoped_cache", {})
+        scoped_chain = MagicMock()
+        scoped_chain.invoke.return_value = "Scoped answer."
+        scoped_retriever = MagicMock()
+        scoped_retriever.invoke.return_value = []
+        with patch.object(app, "build_rag_chain", return_value=scoped_chain) as mock_chain, patch.object(
+            app, "build_retriever", return_value=scoped_retriever
+        ) as mock_retriever:
+            result = app.answer("What is PTO?", history=[], scope=["abc"])
+
+        mock_chain.assert_called_once_with(app._vector_db, ["abc"])
+        mock_retriever.assert_called_once_with(app._vector_db, ["abc"])
+        scoped_chain.invoke.assert_called_once_with("What is PTO?")
+        assert result == "Scoped answer."
+
+
+class TestScopedPipeline:
+    """Tests for the _scoped_pipeline cache."""
+
+    def test_empty_scope_returns_unscoped_pipeline(self, monkeypatch):
+        unscoped_chain = MagicMock()
+        unscoped_retriever = MagicMock()
+        monkeypatch.setattr(app, "_rag_chain", unscoped_chain)
+        monkeypatch.setattr(app, "_retriever", unscoped_retriever)
+
+        chain, retriever = app._scoped_pipeline([])
+
+        assert chain is unscoped_chain
+        assert retriever is unscoped_retriever
+
+    def test_scoped_pipeline_is_cached(self, monkeypatch):
+        monkeypatch.setattr(app, "_vector_db", MagicMock())
+        monkeypatch.setattr(app, "_scoped_cache", {})
+        with patch.object(app, "build_rag_chain", return_value=MagicMock()) as mock_chain, patch.object(
+            app, "build_retriever", return_value=MagicMock()
+        ):
+            app._scoped_pipeline(["a", "b"])
+            app._scoped_pipeline(["b", "a"])  # Same set, different order → same cache key
+
+        assert mock_chain.call_count == 1
+
 
 class TestIngestPdfs:
     """Tests for the ingest_pdfs() upload handler."""
@@ -83,10 +127,11 @@ class TestIngestPdfs:
     def test_no_files_returns_message(self, monkeypatch):
         monkeypatch.setattr(app, "list_documents", lambda db: [])
 
-        status, rows, _dropdown = app.ingest_pdfs(None)
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.ingest_pdfs(None)
 
         assert status == "No files uploaded."
         assert rows == []
+        assert scope_reset == []
 
     @patch.object(app, "build_retriever")
     @patch.object(app, "build_rag_chain")
@@ -110,7 +155,7 @@ class TestIngestPdfs:
             SimpleNamespace(path="/tmp/b.pdf", orig_name="b.pdf"),
         ]
 
-        status, rows, _dropdown = app.ingest_pdfs(files)
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.ingest_pdfs(files)
 
         assert mock_add.call_count == 2
         assert "Indexed a.pdf (3 chunks)" in status
@@ -129,7 +174,7 @@ class TestIngestPdfs:
         mock_add.side_effect = app.PdfIngestError("No extractable text found in this PDF.")
         files = [SimpleNamespace(path="/tmp/scan.pdf", orig_name="scan.pdf")]
 
-        status, rows, _dropdown = app.ingest_pdfs(files)
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.ingest_pdfs(files)
 
         assert "Skipped scan.pdf" in status
         assert "No extractable text" in status
@@ -148,11 +193,55 @@ class TestIngestPdfs:
             SimpleNamespace(path="/tmp/b.pdf", orig_name="b.pdf"),
         ]
 
-        status, rows, _dropdown = app.ingest_pdfs(files)
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.ingest_pdfs(files)
 
         assert mock_add.call_count == 1  # Stopped after the first file's quota error
         assert "Stopped at a.pdf" in status
         assert "quota exhausted" in status.lower()
+
+
+class TestStatusSummary:
+    """Tests for _status_summary and scope sync."""
+
+    def test_reports_empty_store(self, monkeypatch):
+        monkeypatch.setattr(app, "_vector_db", None)
+        monkeypatch.setattr(app, "list_documents", lambda db: [])
+
+        summary = app._status_summary()
+
+        assert "not loaded" in summary
+        assert app.EMBEDDING_MODEL in summary
+        assert "MMR" in summary
+
+    def test_reports_indexed_documents_and_chunks(self, monkeypatch):
+        monkeypatch.setattr(app, "_vector_db", MagicMock())
+        monkeypatch.setattr(
+            app,
+            "list_documents",
+            lambda db: [
+                {"doc_id": "a", "source": "a.pdf", "chunks": 3},
+                {"doc_id": "b", "source": "b.pdf", "chunks": 5},
+            ],
+        )
+        monkeypatch.setattr(app, "_store_is_persisted", lambda: True)
+
+        summary = app._status_summary()
+
+        assert "2 (8 chunks)" in summary
+        assert "Scoping:** available" in summary
+
+    def test_sync_scope_normalises_empty(self):
+        assert app._sync_scope(None) == []
+        assert app._sync_scope([]) == []
+        assert app._sync_scope(["a"]) == ["a"]
+
+    def test_build_demo_without_init(self, monkeypatch):
+        monkeypatch.setattr(app, "_vector_db", None)
+        monkeypatch.setattr(app, "list_documents", lambda db: [])
+
+        demo = app.build_demo()
+
+        assert demo is not None
 
 
 class TestRemoveDocument:
@@ -161,7 +250,7 @@ class TestRemoveDocument:
     def test_no_selection_returns_prompt(self, monkeypatch):
         monkeypatch.setattr(app, "list_documents", lambda db: [])
 
-        status, rows, _dropdown = app.remove_document(None)
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.remove_document(None)
 
         assert status == "Select a document to remove."
 
@@ -169,7 +258,7 @@ class TestRemoveDocument:
         monkeypatch.setattr(app, "_vector_db", None)
         monkeypatch.setattr(app, "list_documents", lambda db: [])
 
-        status, rows, _dropdown = app.remove_document("deadbeef")
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.remove_document("deadbeef")
 
         assert status == "No documents are indexed."
 
@@ -187,7 +276,7 @@ class TestRemoveDocument:
             lambda _db: [{"doc_id": "deadbeef", "source": "handbook.pdf", "chunks": 4}],
         )
 
-        status, rows, _dropdown = app.remove_document("deadbeef")
+        status, rows, _remove_dd, _scope_dd, _status, scope_reset = app.remove_document("deadbeef")
 
         mock_remove.assert_called_once_with(db, "deadbeef")
         assert status == "Removed handbook.pdf."

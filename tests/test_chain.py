@@ -1,8 +1,18 @@
 """Unit tests for rag.chain."""
 
+from unittest.mock import MagicMock
+
 from langchain_core.documents import Document
 
-from rag.chain import RETRIEVER_K, _format_doc_label, _format_docs, build_rag_chain
+from rag.chain import (
+    MMR_LAMBDA,
+    RETRIEVER_FETCH_K,
+    RETRIEVER_K,
+    _format_doc_label,
+    _format_docs,
+    build_rag_chain,
+    build_retriever,
+)
 
 
 class TestFormatDocLabel:
@@ -39,6 +49,40 @@ class TestFormatDocs:
         assert _format_docs([]) == ""
 
 
+class TestBuildRetriever:
+    """Tests for build_retriever search configuration."""
+
+    def test_uses_mmr_with_diversity_settings(self):
+        db = MagicMock()
+
+        build_retriever(db)
+
+        db.as_retriever.assert_called_once_with(
+            search_type="mmr",
+            search_kwargs={
+                "k": RETRIEVER_K,
+                "fetch_k": RETRIEVER_FETCH_K,
+                "lambda_mult": MMR_LAMBDA,
+            },
+        )
+
+    def test_adds_doc_id_filter_when_scoped(self):
+        db = MagicMock()
+
+        build_retriever(db, doc_ids=["a", "b"])
+
+        _, kwargs = db.as_retriever.call_args
+        assert kwargs["search_kwargs"]["filter"] == {"doc_id": {"$in": ["a", "b"]}}
+
+    def test_no_filter_when_doc_ids_empty(self):
+        db = MagicMock()
+
+        build_retriever(db, doc_ids=[])
+
+        _, kwargs = db.as_retriever.call_args
+        assert "filter" not in kwargs["search_kwargs"]
+
+
 class TestBuildRagChain:
     """Tests for build_rag_chain."""
 
@@ -46,4 +90,17 @@ class TestBuildRagChain:
         chain = build_rag_chain(mock_vector_db)
 
         assert hasattr(chain, "invoke")
-        mock_vector_db.as_retriever.assert_called_once_with(search_kwargs={"k": RETRIEVER_K})
+        mock_vector_db.as_retriever.assert_called_once_with(
+            search_type="mmr",
+            search_kwargs={
+                "k": RETRIEVER_K,
+                "fetch_k": RETRIEVER_FETCH_K,
+                "lambda_mult": MMR_LAMBDA,
+            },
+        )
+
+    def test_passes_doc_id_scope_to_retriever(self, mock_vector_db):
+        build_rag_chain(mock_vector_db, doc_ids=["x"])
+
+        _, kwargs = mock_vector_db.as_retriever.call_args
+        assert kwargs["search_kwargs"]["filter"] == {"doc_id": {"$in": ["x"]}}
