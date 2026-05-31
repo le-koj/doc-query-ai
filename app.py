@@ -20,6 +20,7 @@ from rag.chain import (  # Retrieval + LLM chain and its tuned settings
     _format_doc_label,
     build_rag_chain,
     build_retriever,
+    retrieval_status_line,
 )
 from rag.ingest import (  # Library ingestion helpers
     CHROMA_DIR,
@@ -274,8 +275,7 @@ def _status_summary() -> str:
             store_line,
             f"- **Indexed documents:** {len(docs)} ({total_chunks} chunks)",
             f"- **Embeddings:** `{EMBEDDING_MODEL}`",
-            f"- **Retrieval:** MMR (k={RETRIEVER_K}, fetch_k={RETRIEVER_FETCH_K}, "
-            f"\u03bb={MMR_LAMBDA})",
+            f"- **Retrieval:** {retrieval_status_line()}",
             scope_line,
         ]
     )

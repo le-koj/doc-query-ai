@@ -1,6 +1,6 @@
 # Doc Query AI
 
-**Version 2.1.0**
+**Version 2.2.0**
 
 A document question-answering app built with retrieval-augmented generation (RAG). Upload multiple PDFs, index them into a local document library, and ask natural-language questions grounded in your content — with answers that cite their source documents.
 
@@ -10,6 +10,7 @@ A document question-answering app built with retrieval-augmented generation (RAG
 - **Source attribution** — every chunk is tagged with its document and page, and answers cite the source(s) used
 - **Scoped search** — restrict the chat to a chosen subset of documents, or search the whole library
 - **MMR retrieval** — Maximal Marginal Relevance returns relevant *and* diverse chunks for better multi-document recall
+- **Cross-encoder reranking** — a local reranker reorders MMR candidates before the LLM sees them (on by default; disable with `RERANK_ENABLED=false`)
 - **Vector search** — embed chunks with Google Gemini and store them in ChromaDB
 - **Resilient embeddings** — automatic retry/back-off on Gemini rate limits (429), with a clear message if quota is exhausted
 - **Gradio web UI** — chat interface with multi-file upload, a live document table, and per-document removal
@@ -24,7 +25,8 @@ A document question-answering app built with retrieval-augmented generation (RAG
 | Vector store | [ChromaDB](https://www.trychroma.com/) via `langchain-chroma` |
 | Orchestration | [LangChain](https://python.langchain.com/) |
 | Embeddings | Google Gemini `gemini-embedding-2` |
-| LLM | Google Gemini `gemini-2.5-flash` |
+| LLM | Google Gemini `gemini-3.1-flash-lite` |
+| Reranker | HuggingFace cross-encoder via `sentence-transformers` |
 | Web UI | [Gradio](https://gradio.app/) 6.x |
 
 ## Models
@@ -32,9 +34,10 @@ A document question-answering app built with retrieval-augmented generation (RAG
 | Role | Model | Configured in |
 |------|-------|---------------|
 | Embeddings | `gemini-embedding-2` | `rag/ingest.py` |
-| Answer generation | `gemini-2.5-flash` | `rag/chain.py` |
+| Answer generation | `gemini-3.1-flash-lite` | `rag/chain.py` |
+| Reranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` (local) | `rag/chain.py` |
 
-Both require a [Google AI API key](https://aistudio.google.com/apikey). Free-tier quotas apply separately per model.
+Embeddings and answer generation require a [Google AI API key](https://aistudio.google.com/apikey). Free-tier quotas apply separately per model. Reranking runs locally via `sentence-transformers` — no extra API key.
 
 ## Prerequisites
 
@@ -63,9 +66,24 @@ Create a `.env` file in the project root:
 
 ```env
 GOOGLE_API_KEY=your_api_key_here
+
+# Optional — reranking (defaults shown)
+RERANK_ENABLED=true
+RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+RERANK_CANDIDATE_K=30
+RERANK_TOP_N=6
 ```
 
 Do not commit `.env` — it is listed in `.gitignore`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RERANK_ENABLED` | `true` | Set to `false` to skip reranking and use plain MMR |
+| `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace cross-encoder model ID |
+| `RERANK_CANDIDATE_K` | `30` | MMR candidate pool size before reranking |
+| `RERANK_TOP_N` | `6` | Chunks passed to the LLM after reranking |
+
+The reranker model downloads from HuggingFace on first query (~80 MB). The system status panel in the UI shows the active retrieval configuration.
 
 Optionally place a seed PDF at `documents/TechCorp_Official_Employee_Handbook.pdf` to index automatically on first run. Otherwise the app starts empty and waits for you to upload one or more PDFs through the UI.
 
@@ -108,7 +126,7 @@ The test suite covers pure logic and guard clauses with mocks — no API key req
 
 | File | What it covers |
 |------|----------------|
-| `test_chain.py` | `_format_doc_label`, `_format_docs`, `build_rag_chain` wiring |
+| `test_chain.py` | `_format_doc_label`, `_format_docs`, MMR/rerank retriever config, `build_rag_chain` wiring |
 | `test_ingest.py` | `load_vector_store` branching, `_load_chunks` metadata, `add_pdf`, `remove_pdf`, `list_documents` |
 | `test_app.py` | `answer()` with source attribution, `ingest_pdfs()`, Gradio upload path resolution |
 
@@ -119,11 +137,11 @@ Integration tests that call Gemini or ChromaDB with real embeddings can be marke
 ```
 PDF(s) → chunk + tag (doc_id, source, page) → embed (gemini-embedding-2) → ChromaDB library
                                                                                   ↓
-User question → retrieve top-k chunks across all docs → prompt + gemini-2.5-flash → answer + sources
+User question → MMR candidates → cross-encoder rerank → top-N chunks → prompt + LLM → answer + sources
 ```
 
 1. **Ingest** (`rag/ingest.py`) — loads each PDF, splits it into 500-character chunks with 50-character overlap, tags every chunk with `doc_id` (content hash), `source` filename, `page`, and `chunk_index`, embeds with `gemini-embedding-2`, and appends to `./chroma_db`. `add_pdf` grows the library; `remove_pdf` and `list_documents` manage it.
-2. **Chain** (`rag/chain.py`) — retrieves chunks with MMR (top 6 from a pool of 20, balancing relevance and diversity), optionally filtered to selected `doc_id`s, formats them with source labels, fills a prompt template, and sends it to `gemini-2.5-flash` for a concise, source-citing answer
+2. **Chain** (`rag/chain.py`) — retrieves chunks with MMR (30 candidates by default, balancing relevance and diversity), optionally reranks them with a local cross-encoder (top 6 by default), optionally filtered to selected `doc_id`s, formats them with source labels, fills a prompt template, and sends it to Gemini for a concise, source-citing answer
 3. **UI** (`app.py`) — Gradio chat interface with multi-file upload, per-document removal, and a **Search in** selector to scope queries; documents are added incrementally and re-uploads refresh in place by `doc_id` without wiping other documents
 
 ## Project layout
@@ -151,6 +169,14 @@ doc-query-ai/
 ```
 
 ## Changelog
+
+### 2.2.0
+
+- Cross-encoder reranking: MMR produces a candidate pool, then a local HuggingFace reranker keeps the best chunks for the LLM
+- Configurable via `RERANK_ENABLED`, `RERANK_MODEL`, `RERANK_CANDIDATE_K`, and `RERANK_TOP_N`
+- Lazy model load on first query; retrieval config shown in the UI status panel
+- Add `sentence-transformers`, `torch`, and related dependencies
+- Expand test suite to 62 tests
 
 ### 2.1.0
 
