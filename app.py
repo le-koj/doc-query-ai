@@ -8,15 +8,12 @@ Usage:
     python app.py
 """
 
-import os  # Detect a seed PDF on startup
+import os  # Detect a seed PDF on startup and resolve upload paths
 
 import gradio as gr  # Web UI framework for the chat interface
 from dotenv import load_dotenv  # Load API keys from a .env file
 
 from rag.chain import (  # Retrieval + LLM chain and its tuned settings
-    MMR_LAMBDA,
-    RETRIEVER_FETCH_K,
-    RETRIEVER_K,
     _format_doc_label,
     build_rag_chain,
     build_retriever,
@@ -64,7 +61,11 @@ def init_pipeline(seed_pdf_path: str = SEED_PDF_PATH) -> None:
 
 
 def _rebuild_chain() -> None:
-    """Rebuild the chain and retriever from the current vector store."""
+    """Rebuild the chain and retriever from the current vector store.
+
+    Clears scoped caches whenever the library changes so stale doc_id filters
+    are not reused after ingest or remove operations.
+    """
     global _rag_chain, _retriever, _scoped_cache
     _scoped_cache = {}  # Invalidate scoped pipelines whenever the library changes
     if _vector_db is None:
@@ -90,7 +91,7 @@ def _scoped_pipeline(doc_ids):
     """
     if not doc_ids:
         return _rag_chain, _retriever
-    key = tuple(sorted(doc_ids))
+    key = tuple(sorted(doc_ids))  # Normalise order so {A,B} == {B,A}
     if key not in _scoped_cache:
         _scoped_cache[key] = (
             build_rag_chain(_vector_db, list(key)),
@@ -103,58 +104,43 @@ def answer(question: str, history: list, scope=None) -> str:
     """Handle a chat message from the Gradio interface.
 
     Args:
-        question: The user's natural-language question.
+        question: The user's natural-language question. May be a string or, in
+            some Gradio chat modes, a dict with a ``text`` key.
         history: Conversation history supplied by Gradio (unused; chain is stateless).
         scope: Optional list of ``doc_id`` values to restrict the search to.
             An empty or missing selection searches the whole library.
 
     Returns:
         str: A plain-text answer grounded in the library, with a list of the
-            source documents used.
+            source documents used when retrieval succeeds.
     """
-    print(f"DEBUG: answer() called with:")
-    print(f"  question: {repr(question)} (type: {type(question)})")
-    print(f"  history: {repr(history)} (type: {type(history)})")
-    print(f"  scope: {repr(scope)} (type: {type(scope)})")
-    
     try:
         if not question:
-            print("DEBUG: question is falsy, returning early prompt")
             return "Please enter a question."
 
-        # If question is a dictionary (like in multimodal mode or custom chatbot interface)
+        # Gradio may pass a dict payload in multimodal or custom chat modes.
         if isinstance(question, dict):
-            print("DEBUG: question is a dictionary, extracting text")
             question_str = question.get("text", "")
         else:
             question_str = str(question)
 
         if not question_str.strip():
-            print("DEBUG: question_str is empty after strip, returning early prompt")
             return "Please enter a question."
 
         if _rag_chain is None:
-            print("DEBUG: _rag_chain is None, returning early prompt")
             return "Upload one or more PDFs and click 'Index documents' before asking questions."
 
-        print("DEBUG: building scoped pipeline")
         chain, retriever = _scoped_pipeline(scope)  # Restrict to selected docs when provided
 
-        print("DEBUG: invoking chain and retriever")
         result = chain.invoke(question_str)  # Retrieve context and generate an answer
         sources = _sources_for(question_str, retriever)  # Identify which documents were used
 
         if sources:
             result += "\n\n_Sources: " + ", ".join(sources) + "_"
-        print(f"DEBUG: returning response: {repr(result)}")
         return result
     except EmbeddingQuotaError as exc:
-        print(f"DEBUG: EmbeddingQuotaError caught: {exc}")
         return str(exc)
     except Exception as exc:
-        import traceback
-        print("DEBUG: Exception caught inside answer():")
-        traceback.print_exc()
         return f"Sorry, something went wrong answering that: {exc}"
 
 
@@ -162,11 +148,12 @@ def _sources_for(question: str, retriever=None) -> list[str]:
     """Return the distinct source labels retrieved for a question.
 
     Args:
-        question: The user's question.
+        question: The user's question passed to the retriever.
         retriever: The retriever to query. Defaults to the unscoped retriever.
 
     Returns:
-        list[str]: Unique ``[source, p. N]`` labels, preserving retrieval order.
+        list[str]: Unique ``source, p. N`` labels (without brackets), preserving
+            retrieval order.
     """
     retriever = retriever or _retriever
     if retriever is None:
@@ -180,7 +167,18 @@ def _sources_for(question: str, retriever=None) -> list[str]:
 
 
 def _resolve_upload_path(file) -> str | None:
-    """Extract the on-disk PDF path from a Gradio file upload."""
+    """Extract the on-disk PDF path from a Gradio file upload.
+
+    Gradio may return a path string, a dict with ``path``/``name`` keys, or a
+    file-like object depending on version and component settings.
+
+    Args:
+        file: A single upload value from ``gr.File``.
+
+    Returns:
+        str | None: Absolute or relative path to the uploaded PDF, or ``None``
+            when the upload is empty or unrecognised.
+    """
     if file is None:
         return None
     if isinstance(file, str):
@@ -191,7 +189,16 @@ def _resolve_upload_path(file) -> str | None:
 
 
 def ingest_pdfs(files) -> tuple:
-    """Index one or more uploaded PDFs into the library and rebuild the chain."""
+    """Index one or more uploaded PDFs into the library and rebuild the chain.
+
+    Args:
+        files: One or more Gradio file upload values (single file or list).
+
+    Returns:
+        tuple: UI refresh values — status text, library table rows, remove
+            dropdown update, scope dropdown update, status panel markdown, and
+            cleared scope state.
+    """
     global _vector_db
 
     if not files:
@@ -216,7 +223,7 @@ def ingest_pdfs(files) -> tuple:
             errors.append(f"Skipped {name}: {exc}")
         except EmbeddingQuotaError as exc:
             errors.append(f"Stopped at {name}: {exc}")
-            break
+            break  # Further uploads would likely hit the same quota wall
 
     _rebuild_chain()
     status_lines = indexed + errors
@@ -225,7 +232,14 @@ def ingest_pdfs(files) -> tuple:
 
 
 def remove_document(doc_id: str) -> tuple:
-    """Remove a single document from the library and rebuild the chain."""
+    """Remove a single document from the library and rebuild the chain.
+
+    Args:
+        doc_id: The ``doc_id`` metadata value of the document to delete.
+
+    Returns:
+        tuple: Same UI refresh tuple as ``ingest_pdfs``.
+    """
     global _vector_db
 
     if not doc_id:
@@ -244,18 +258,34 @@ def remove_document(doc_id: str) -> tuple:
 
 
 def _ingest_result(status: str) -> tuple:
-    """Build the full UI refresh tuple after an ingest or remove action."""
+    """Build the full UI refresh tuple after an ingest or remove action.
+
+    Args:
+        status: Human-readable status message for the upload/remove textbox.
+
+    Returns:
+        tuple: ``(status, library_rows, remove_update, scope_update,
+            status_summary, scope_state)`` for Gradio outputs.
+    """
     remove_update, scope_update = _dropdown_updates()
     return status, _library_rows(), remove_update, scope_update, _status_summary(), []
 
 
 def _library_rows() -> list[list]:
-    """Return the indexed-document library as table rows for the UI."""
+    """Return the indexed-document library as table rows for the UI.
+
+    Returns:
+        list[list]: Rows of ``[source_filename, chunk_count]``.
+    """
     return [[doc["source"], doc["chunks"]] for doc in list_documents(_vector_db)]
 
 
 def _document_choices() -> list[tuple[str, str]]:
-    """Return ``(label, doc_id)`` choices for document selectors."""
+    """Return ``(label, doc_id)`` choices for document selectors.
+
+    Returns:
+        list[tuple[str, str]]: Display labels paired with internal doc ids.
+    """
     return [
         (f"{doc['source']} ({doc['chunks']} chunks)", doc["doc_id"])
         for doc in list_documents(_vector_db)
@@ -263,7 +293,12 @@ def _document_choices() -> list[tuple[str, str]]:
 
 
 def _dropdown_updates():
-    """Build refreshed updates for the remove and scope selectors."""
+    """Build refreshed updates for the remove and scope selectors.
+
+    Returns:
+        tuple: ``(remove_select_update, scope_select_update)`` Gradio updates
+            with refreshed choices and cleared values.
+    """
     choices = _document_choices()
     return (
         gr.update(choices=choices, value=None),
@@ -272,12 +307,20 @@ def _dropdown_updates():
 
 
 def _store_is_persisted() -> bool:
-    """Return True when a non-empty ChromaDB store exists on disk."""
+    """Return True when a non-empty ChromaDB store exists on disk.
+
+    Returns:
+        bool: ``True`` when ``CHROMA_DIR`` exists and contains files.
+    """
     return os.path.isdir(CHROMA_DIR) and bool(os.listdir(CHROMA_DIR))
 
 
 def _status_summary() -> str:
-    """Build a markdown panel describing the current store and retrieval setup."""
+    """Build a markdown panel describing the current store and retrieval setup.
+
+    Returns:
+        str: Markdown text for the system status panel in the sidebar.
+    """
     docs = list_documents(_vector_db)
     total_chunks = sum(doc["chunks"] for doc in docs)
 
@@ -307,7 +350,18 @@ def _status_summary() -> str:
 
 
 def _sync_scope(selected) -> list:
-    """Copy the scope dropdown value into the chat's scope state."""
+    """Copy the scope dropdown value into the chat's scope state.
+
+    ``scope_state`` is passed to ``ChatInterface`` as an additional input. Updating
+    it from ``scope_select.change`` avoids wiring the dropdown directly into the
+    chat component, which previously caused Gradio deadlocks on page load.
+
+    Args:
+        selected: Current value of the multi-select scope dropdown.
+
+    Returns:
+        list: Normalised list of selected ``doc_id`` values (empty list means all).
+    """
     return selected or []
 
 
@@ -317,6 +371,9 @@ def build_demo() -> gr.Blocks:
     The UI is constructed here (not at import time) so persisted documents and
     status appear immediately without a ``demo.load`` event that can deadlock
     with ``ChatInterface``.
+
+    Returns:
+        gr.Blocks: The configured Gradio application, ready to ``launch()``.
     """
     with gr.Blocks(title="Doc Query AI") as demo:
         scope_state = gr.State([])  # Passed to the chat; kept separate from scope_select
@@ -375,7 +432,7 @@ def build_demo() -> gr.Blocks:
             fn=_sync_scope,
             inputs=scope_select,
             outputs=scope_state,
-            queue=False,
+            queue=False,  # Synchronous update avoids racing the chat queue
         )
 
         library_outputs = [upload_status, library, remove_select, scope_select, status_panel, scope_state]
@@ -388,5 +445,5 @@ def build_demo() -> gr.Blocks:
 if __name__ == "__main__":
     init_pipeline()
     demo = build_demo()
-    demo.queue(default_concurrency_limit=4)
+    demo.queue(default_concurrency_limit=4)  # Allow concurrent chat and ingest jobs
     demo.launch()

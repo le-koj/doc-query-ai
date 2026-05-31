@@ -1,9 +1,9 @@
 """Document ingestion utilities for the RAG pipeline.
 
 Loads PDF files, splits them into text chunks, tags each chunk with source
-metadata, embeds them with Google Gemini, and persists the vectors to a local
-ChromaDB store. The store holds a *library* of documents: PDFs are added
-incrementally without wiping previously indexed content.
+metadata, embeds them with a local Hugging Face model, and persists the vectors
+to a local ChromaDB store. The store holds a *library* of documents: PDFs are
+added incrementally without wiping previously indexed content.
 """
 
 import hashlib  # Derive a stable document id from file contents
@@ -11,11 +11,11 @@ import os  # Check whether the ChromaDB directory already exists
 import re  # Parse the retry delay out of rate-limit error messages
 import time  # Back off between embedding retries
 
-from langchain_community.document_loaders import PyPDFLoader  # Extract text from PDF files
+import torch  # Detect CUDA availability for embedding device selection
 from langchain_chroma import Chroma  # Local vector database for document embeddings
+from langchain_community.document_loaders import PyPDFLoader  # Extract text from PDF files
 from langchain_core.documents import Document  # Typed document chunks
 from langchain_core.embeddings import Embeddings  # Base interface for embedding wrappers
-import torch
 from langchain_huggingface import HuggingFaceEmbeddings  # Local Hugging Face embedding model
 from langchain_text_splitters import RecursiveCharacterTextSplitter  # Split documents into chunks
 
@@ -23,22 +23,37 @@ CHROMA_DIR = "./chroma_db"  # Directory where ChromaDB persists its SQLite datab
 CHUNK_SIZE = 500  # Maximum number of characters per text chunk
 CHUNK_OVERLAP = 50  # Number of overlapping characters between adjacent chunks
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")  # Local Hugging Face embedding model
-EMBED_BATCH_SIZE = 100  # Texts per embedding request (the Gemini API max)
+EMBED_BATCH_SIZE = 100  # Texts per embedding request batch
 EMBED_MAX_RETRIES = 5  # Attempts before giving up on a rate-limited batch
 EMBED_DEFAULT_RETRY_SECONDS = 30.0  # Fallback wait when the API gives no retry hint
 EMBED_MAX_RETRY_SECONDS = 75.0  # Cap a single back-off so the UI never hangs forever
 
 
 class PdfIngestError(ValueError):
-    """Raised when a PDF cannot be indexed because it has no usable text."""
+    """Raised when a PDF cannot be indexed because it has no usable text.
+
+    Typical causes include empty files, image-only scans, or PDFs that yield
+    zero chunks after splitting.
+    """
 
 
 class EmbeddingQuotaError(RuntimeError):
-    """Raised when embeddings can't be generated because the API quota is exhausted."""
+    """Raised when embeddings can't be generated because the API quota is exhausted.
+
+    The resilient wrapper raises this after all retry attempts on rate-limit
+    (429 / RESOURCE_EXHAUSTED) responses are exhausted.
+    """
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
-    """Return True when an exception looks like an API rate-limit / quota error."""
+    """Return True when an exception looks like an API rate-limit / quota error.
+
+    Args:
+        error: Any exception raised by an embedding API call.
+
+    Returns:
+        bool: ``True`` when the message contains a known rate-limit marker.
+    """
     message = str(error)
     return "RESOURCE_EXHAUSTED" in message or "429" in message
 
@@ -47,7 +62,7 @@ def _parse_retry_seconds(message: str) -> float:
     """Extract a retry delay (seconds) from a rate-limit error message.
 
     Args:
-        message: The error text returned by the Gemini API.
+        message: The error text returned by the embedding API.
 
     Returns:
         float: The suggested wait time, falling back to a default and capped to
@@ -63,9 +78,9 @@ def _parse_retry_seconds(message: str) -> float:
 class ResilientEmbeddings(Embeddings):
     """Embeddings wrapper that retries rate-limited batches with back-off.
 
-    Free-tier Gemini limits embedding requests per minute. This wrapper splits
-    work into batches and, on a ``RESOURCE_EXHAUSTED`` (429) response, waits for
-    the API-suggested delay and retries instead of crashing the request.
+    Remote embedding APIs enforce per-minute quotas. This wrapper splits work
+    into batches and, on a ``RESOURCE_EXHAUSTED`` (429) response, waits for the
+    suggested delay and retries instead of crashing the request.
     """
 
     def __init__(
@@ -75,13 +90,34 @@ class ResilientEmbeddings(Embeddings):
         max_retries: int = EMBED_MAX_RETRIES,
         sleep=time.sleep,
     ) -> None:
+        """Initialise the resilient wrapper around a base embedding model.
+
+        Args:
+            base: The underlying ``Embeddings`` implementation to call.
+            batch_size: Maximum texts sent per ``embed_documents`` batch.
+            max_retries: Number of attempts per batch before raising
+                ``EmbeddingQuotaError``.
+            sleep: Callable used to pause between retries; injectable for tests.
+        """
         self._base = base
         self._batch_size = batch_size
         self._max_retries = max_retries
         self._sleep = sleep  # Injectable for tests
 
     def _call_with_retry(self, func, *args):
-        """Invoke an embedding call, retrying on rate-limit errors."""
+        """Invoke an embedding call, retrying on rate-limit errors.
+
+        Args:
+            func: Bound method on ``self._base`` (e.g. ``embed_query``).
+            *args: Positional arguments forwarded to ``func``.
+
+        Returns:
+            The return value of ``func(*args)`` on success.
+
+        Raises:
+            EmbeddingQuotaError: When rate limits persist after all retries.
+            Exception: Re-raises any non-rate-limit error immediately.
+        """
         for attempt in range(1, self._max_retries + 1):
             try:
                 return func(*args)
@@ -103,7 +139,14 @@ class ResilientEmbeddings(Embeddings):
         raise EmbeddingQuotaError("Embedding retries exhausted.")  # Defensive fallback
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed documents in batches, retrying rate-limited batches."""
+        """Embed documents in batches, retrying rate-limited batches.
+
+        Args:
+            texts: Plain-text strings to embed, one vector per string.
+
+        Returns:
+            list[list[float]]: Embedding vectors in the same order as ``texts``.
+        """
         embeddings: list[list[float]] = []
         for start in range(0, len(texts), self._batch_size):
             batch = texts[start : start + self._batch_size]
@@ -111,16 +154,26 @@ class ResilientEmbeddings(Embeddings):
         return embeddings
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a single query, retrying on rate-limit errors."""
+        """Embed a single query, retrying on rate-limit errors.
+
+        Args:
+            text: The user's natural-language question or search string.
+
+        Returns:
+            list[float]: The query embedding vector.
+        """
         return self._call_with_retry(self._base.embed_query, text)
 
 
 def _build_embeddings() -> Embeddings:
     """Create a rate-limit-resilient Hugging Face embeddings client.
 
+    Uses CUDA when available; otherwise falls back to CPU. Vectors are L2-
+    normalized so cosine similarity in Chroma behaves consistently.
+
     Returns:
-        Embeddings: A wrapper around the configured Hugging Face embedding model that
-            retries rate-limited batches with back-off.
+        Embeddings: A ``ResilientEmbeddings`` wrapper around the configured
+            Hugging Face model.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     base = HuggingFaceEmbeddings(
@@ -141,7 +194,7 @@ def compute_doc_id(pdf_path: str) -> str:
         pdf_path: Filesystem path to the PDF file.
 
     Returns:
-        str: A short hex digest uniquely identifying the file contents.
+        str: A 16-character hex digest uniquely identifying the file contents.
     """
     hasher = hashlib.sha256()
     with open(pdf_path, "rb") as handle:
@@ -218,7 +271,7 @@ def load_vector_store(pdf_path: str | None = None) -> Chroma | None:
         Chroma | None: A Chroma vector store ready for retrieval queries, or
             ``None`` when no store exists and no seed PDF is available.
     """
-    embeddings = _build_embeddings()  # Initialise the Gemini embedding model
+    embeddings = _build_embeddings()  # Initialise the embedding model
 
     # Reuse the persisted store when available to skip re-embedding
     if os.path.exists(CHROMA_DIR) and os.listdir(CHROMA_DIR):
@@ -278,8 +331,8 @@ def add_pdf(vector_db: Chroma | None, pdf_path: str) -> dict:
         pdf_path: Filesystem path to the PDF to index.
 
     Returns:
-        dict: Summary with ``doc_id``, ``source``, ``chunks``, and a
-            ``replaced`` flag indicating whether prior chunks were removed.
+        dict: Summary with keys ``vector_db``, ``doc_id``, ``source``,
+            ``chunks``, and ``replaced`` (``True`` when prior chunks were removed).
 
     Raises:
         PdfIngestError: If the PDF has no extractable text.
@@ -349,6 +402,6 @@ def list_documents(vector_db: Chroma | None) -> list[dict]:
             doc_id,
             {"doc_id": doc_id, "source": metadata.get("source", "unknown"), "chunks": 0},
         )
-        entry["chunks"] += 1
+        entry["chunks"] += 1  # Count chunks sharing the same doc_id
 
     return sorted(summary.values(), key=lambda item: item["source"].lower())
