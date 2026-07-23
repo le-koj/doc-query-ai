@@ -80,7 +80,7 @@ pillow==12.2.0
 pluggy==1.6.0
 propcache==0.5.2
 protobuf==6.33.6
-pyasn1==0.6.3
+pyasn1==0.6.4
 pyasn1_modules==0.4.2
 pybase64==1.4.3
 pycparser==3.0
